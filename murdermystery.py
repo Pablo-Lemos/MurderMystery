@@ -49,7 +49,6 @@ class Player:
         return self._type
 
     def ask_about_player(self, other_player):
-        print(f"{self._name} is asking about {other_player.get_name()}.")
         other_type = other_player.get_type()
         r = random.random()
         if self._type == "Innocent" and other_type in ["Innocent", "Accomplice"]:
@@ -124,8 +123,11 @@ class MurderMystery:
         noise_level,
         num_accomplices=None,
         frac_accomplices=None,
+        max_choices=100,
         seed=None,
         memory_file=None,
+        llm_player=None,
+        verbosity=2,
     ):
         if seed is not None:
             random.seed(seed)
@@ -158,6 +160,11 @@ class MurderMystery:
         else:
             self._has_memory_file = False
 
+        self._llm_player = llm_player
+        self._is_llm_player = llm_player is not None
+        assert verbosity in [0, 1, 2], "Verbosity must be 0, 1, or 2"
+        self._verbosity = verbosity
+
         self._players = []
         self._noise_level = noise_level
         types = (
@@ -169,107 +176,138 @@ class MurderMystery:
         for i in range(num_players):
             self._players.append(Player(NAMES[i], types[i], noise_level))
 
-        print("=" * 40)
-        print(f"WHO IS THE MURDERER?")
-        print("=" * 40)
-        print(
-            f"There has been a murder! You are a wise and smart detective, tasked with solving the case. There are {num_players} suspects: {', '.join([player.get_name() for player in self._players])}"
-        )
-        print(
-            "You must use your deduction skills to identify the murderer. Do not forget, people lie, and even the evidence can be misleading!"
-        )
+        if self._verbosity >= 2:
+            print("=" * 40)
+            print(f"WHO IS THE MURDERER?")
+            print("=" * 40)
+            print(
+                f"There has been a murder! You are a wise and smart detective, tasked with solving the case. There are {num_players} suspects: {', '.join([player.get_name() for player in self._players])}"
+            )
+            print(
+                "You must use your deduction skills to identify the murderer. Do not forget, people lie, and even the evidence can be misleading!"
+            )
+        elif self._verbosity >= 1:
+            print(f"Starting game with {num_players} suspects...")
         self._memory_human_readable = []
         self._memory_set = []
         self._choice_no = 0
         self._game_over = False
+        self._won = None  # None until game ends, then True/False
+        self._max_choices = max_choices
+
+    def _print(self, *args, **kwargs):
+        """Print only if verbosity >= 2."""
+        if self._verbosity >= 2:
+            print(*args, **kwargs)
+
+    def _print_choice_summary(self):
+        """Print summary of all choices made (for verbosity >= 1)."""
+        if self._verbosity >= 1 and self._memory_human_readable:
+            print("\n" + "=" * 40)
+            print("CHOICES MADE:")
+            print("=" * 40)
+            for memory in self._memory_human_readable:
+                print(memory)
+            print("=" * 40 + "\n")
+
+    def _validate_choice(self, choice: str, max_value: int) -> int:
+        """Validate and convert a choice string to an integer index.
+
+        Returns a valid index (0 to max_value-1), or None if invalid.
+        """
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < max_value:
+                return idx
+            return None  # Out of range
+        except (ValueError, TypeError):
+            return None  # Not a valid integer
 
     def _make_choice(self):
-        print("=" * 40)
-        print("What would you like to do?")
-        print("=" * 40)
-        print("1. Ask a suspect about another")
-        print("2. Check a suspect's alibi")
-        print("3. Examine the evidence")
-        print("4. Check your past choices")
-        print("5. Accuse a suspect")
-        print("6. Quit")
+        self._print("=" * 40)
+        self._print("What would you like to do?")
+        self._print("=" * 40)
+        self._print("1. Ask a suspect about another")
+        self._print("2. Check a suspect's alibi")
+        self._print("3. Examine the evidence")
+        self._print("4. Check your past choices")
+        self._print("5. Accuse a suspect")
+        self._print("6. Quit")
 
-        print("=" * 40)
-        choice = input("Choose your next action:")
-        print("=" * 40)
+        self._print("=" * 40)
+        main_menu = "1. Ask a suspect about another\n2. Check a suspect's alibi\n3. Examine the evidence\n4. Check your past choices\n5. Accuse a suspect\n6. Quit"
+        choice = self._get_input("Choose your next action:", menu_context=main_menu, max_value=6)
+        self._print("=" * 40)
 
         if choice == "1":
-            print("Who would you like to question?")
+            self._print("Who would you like to question?")
+            player_list = "\n".join(f"{i+1}. {p.get_name()}" for i, p in enumerate(self._players))
             for i, player in enumerate(self._players):
-                print(f"{i + 1}. {player.get_name()}")
-            player_to_question = input("Select a player: ")
-            print("Who would you like to ask about?")
+                self._print(f"{i + 1}. {player.get_name()}")
+            player_to_question = self._get_input("Select a player:", menu_context=player_list, max_value=len(self._players))
+            self._print("Who would you like to ask about?")
             for i, player in enumerate(self._players):
-                print(f"{i + 1}. {player.get_name()}")
-            player_to_ask_about = input("Select a player: ")
-            if [
-                1,
-                int(player_to_question) - 1,
-                int(player_to_ask_about) - 1,
-            ] in self._memory_set:
-                print("You have already made that choice.")
+                self._print(f"{i + 1}. {player.get_name()}")
+            player_to_ask_about = self._get_input("Select a player:", menu_context=player_list, max_value=len(self._players))
+            q_idx = self._validate_choice(player_to_question, len(self._players))
+            a_idx = self._validate_choice(player_to_ask_about, len(self._players))
+            if [1, q_idx, a_idx] in self._memory_set:
+                self._print("You have already made that choice.")
                 return
-            elif player_to_question == player_to_ask_about:
-                print("You cannot ask a player about themselves.")
+            elif q_idx == a_idx:
+                self._print("You cannot ask a player about themselves.")
                 return
             else:
                 self._choice_no += 1
-                response = self._players[int(player_to_question) - 1].ask_about_player(
-                    self._players[int(player_to_ask_about) - 1]
-                )
-                print(
-                    f"{self._players[int(player_to_question) - 1].get_name()} says: {response}"
+                response = self._players[q_idx].ask_about_player(self._players[a_idx])
+                self._print(
+                    f"{self._players[q_idx].get_name()} says: {response}"
                 )
                 self._memory_human_readable.append(
-                    f"Choice {self._choice_no}: Asked {self._players[int(player_to_question) - 1].get_name()} about {self._players[int(player_to_ask_about) - 1].get_name()} and got response: {response}"
+                    f"Choice {self._choice_no}: Asked {self._players[q_idx].get_name()} about {self._players[a_idx].get_name()} and got response: {response}"
                 )
-                self._memory_set.append(
-                    [1, int(player_to_question) - 1, int(player_to_ask_about) - 1]
-                )
+                self._memory_set.append([1, q_idx, a_idx])
                 if self._has_memory_file:
                     with open(self._memory_file, "a") as f:
                         f.write(
-                            f"Choice {self._choice_no}: Asked {self._players[int(player_to_question) - 1].get_name()} about {self._players[int(player_to_ask_about) - 1].get_name()} and got response: {response}\n"
+                            f"Choice {self._choice_no}: Asked {self._players[q_idx].get_name()} about {self._players[a_idx].get_name()} and got response: {response}\n"
                         )
         elif choice == "2":
-            print("Who would you like to question?")
+            self._print("Who would you like to question?")
+            player_list = "\n".join(f"{i+1}. {p.get_name()}" for i, p in enumerate(self._players))
             for i, player in enumerate(self._players):
-                print(f"{i + 1}. {player.get_name()}")
-            player_to_question = input("Select a player: ")
-            if [2, int(player_to_question) - 1] in self._memory_set:
-                print("You have already made that choice.")
+                self._print(f"{i + 1}. {player.get_name()}")
+            player_to_question = self._get_input("Select a player:", menu_context=player_list, max_value=len(self._players))
+            q_idx = self._validate_choice(player_to_question, len(self._players))
+            if [2, q_idx] in self._memory_set:
+                self._print("You have already made that choice.")
                 return
             else:
                 self._choice_no += 1
-                response = self._players[int(player_to_question) - 1].check_alibi()
+                response = self._players[q_idx].check_alibi()
 
-                print(
-                    f"{self._players[int(player_to_question) - 1].get_name()} says: {response}"
-                )
+                self._print(f"{self._players[q_idx].get_name()} says: {response}")
                 self._memory_human_readable.append(
-                    f"Choice {self._choice_no}: Checked {self._players[int(player_to_question) - 1].get_name()}'s alibi and got response: {response}"
+                    f"Choice {self._choice_no}: Checked {self._players[q_idx].get_name()}'s alibi and got response: {response}"
                 )
-                self._memory_set.append([2, int(player_to_question) - 1])
+                self._memory_set.append([2, q_idx])
                 if self._has_memory_file:
                     with open(self._memory_file, "a") as f:
                         f.write(
-                            f"Choice {self._choice_no}: Checked {self._players[int(player_to_question) - 1].get_name()}'s alibi and got response: {response}\n"
+                            f"Choice {self._choice_no}: Checked {self._players[q_idx].get_name()}'s alibi and got response: {response}\n"
                         )
         elif choice == "3":
-            print("Which piece of evidence would you like to examine?")
-            print("1. The murder weapon")
-            print("2. The crime scene")
-            print("3. The victim's body")
-            print("4. The suspect's whereabouts")
-            print("5. The timeline")
-            evidence_choice = input("Select a piece of evidence: ")
-            if [3, int(evidence_choice) - 1] in self._memory_set:
-                print("You have already made that choice.")
+            self._print("Which piece of evidence would you like to examine?")
+            self._print("1. The murder weapon")
+            self._print("2. The crime scene")
+            self._print("3. The victim's body")
+            self._print("4. The suspect's whereabouts")
+            self._print("5. The timeline")
+            evidence_menu = "1. The murder weapon\n2. The crime scene\n3. The victim's body\n4. The suspect's whereabouts\n5. The timeline"
+            evidence_choice = self._get_input("Select a piece of evidence:", menu_context=evidence_menu, max_value=5)
+            e_idx = self._validate_choice(evidence_choice, 5)
+            if [3, e_idx] in self._memory_set:
+                self._print("You have already made that choice.")
                 return
             else:
                 self._choice_no += 1
@@ -297,7 +335,7 @@ class MurderMystery:
                         f"Choice {self._choice_no}: Examined evidence and got responses"
                     )
                     for player_name, response in responses:
-                        print(f"{player_name}: {response}")
+                        self._print(f"{player_name}: {response}")
                         self._memory_human_readable.append(
                             f"       {player_name}: {response}"
                         )
@@ -305,7 +343,7 @@ class MurderMystery:
                             with open(self._memory_file, "a") as f:
                                 f.write(f"       {player_name}: {response}\n")
                 else:
-                    print("Evidence was inconclusive")
+                    self._print("Evidence was inconclusive")
                     self._memory_human_readable.append(
                         f"Choice {self._choice_no}: Examined evidence but got no responses."
                     )
@@ -314,43 +352,160 @@ class MurderMystery:
                             f.write(
                                 f"Choice {self._choice_no}: Examined evidence but got no responses.\n"
                             )
-                self._memory_set.append([3, int(evidence_choice) - 1])
+                self._memory_set.append([3, e_idx])
 
         elif choice == "4":
-            print("Your past choices:")
+            self._print("Your past choices:")
             for memory in self._memory_human_readable:
-                print(memory)
+                self._print(memory)
         elif choice == "5":
-            print("Who would you like to accuse?")
+            self._print("Who would you like to accuse?")
+            player_list = "\n".join(f"{i+1}. {p.get_name()}" for i, p in enumerate(self._players))
             for i, player in enumerate(self._players):
-                print(f"{i + 1}. {player.get_name()}")
-            player_to_accuse = input("Select a player: ")
-            if self._players[int(player_to_accuse) - 1].get_type() == "Guilty":
-                print(
-                    f"You have accused {self._players[int(player_to_accuse) - 1].get_name()} and they are the murderer!"
-                )
-                print("You have solved the mystery! Well done!")
+                self._print(f"{i + 1}. {player.get_name()}")
+            player_to_accuse = self._get_input("Select a player:", menu_context=player_list, max_value=len(self._players))
+            acc_idx = self._validate_choice(player_to_accuse, len(self._players))
+            self._print_choice_summary()
+            if self._players[acc_idx].get_type() == "Guilty":
+                if self._verbosity >= 1:
+                    print(
+                        f"You have accused {self._players[acc_idx].get_name()} and they are the murderer!"
+                    )
+                    print("You have solved the mystery! Well done!")
+                self._won = True
             else:
-                print(
-                    f"You have accused {self._players[int(player_to_accuse) - 1].get_name()} but they are NOT the murderer!"
-                )
-                print(
-                    "You have failed to solve the mystery, and the murderer is still at large!"
-                )
+                if self._verbosity >= 1:
+                    print(
+                        f"You have accused {self._players[acc_idx].get_name()} but they are NOT the murderer!"
+                    )
+                    print(
+                        "You have failed to solve the mystery, and the murderer is still at large!"
+                    )
+                self._won = False
             self._game_over = True
         elif choice == "6":
-            print("Exiting the game.")
+            if self._verbosity >= 1:
+                print("Game ended by quit.")
+            self._won = False
             self._game_over = True
         else:
-            print("Invalid choice. Please try again.")
+            self._print("Invalid choice. Please try again.")
+
+    def _make_last_choice(self):
+        # Implementation for the last choice
+        self._print(
+            "Your choices are up, time to choose a suspect with the information you have!"
+        )
+        self._print("1. Accuse a suspect")
+        self._print("2. Check your past choices")
+        self._print("3. Quit")
+        last_menu = "1. Accuse a suspect\n2. Check your past choices\n3. Quit"
+        choice = self._get_input("Select an option:", menu_context=last_menu, max_value=3)
+        if choice == "1":
+            self._print("Who would you like to accuse?")
+            player_list = "\n".join(f"{i+1}. {p.get_name()}" for i, p in enumerate(self._players))
+            for i, player in enumerate(self._players):
+                self._print(f"{i + 1}. {player.get_name()}")
+            player_to_accuse = self._get_input("Select a player:", menu_context=player_list, max_value=len(self._players))
+            acc_idx = self._validate_choice(player_to_accuse, len(self._players))
+            self._print_choice_summary()
+            if self._players[acc_idx].get_type() == "Guilty":
+                if self._verbosity >= 1:
+                    print(
+                        f"You have accused {self._players[acc_idx].get_name()} and they are the murderer!"
+                    )
+                    print("You have solved the mystery! Well done!")
+                self._won = True
+            else:
+                if self._verbosity >= 1:
+                    print(
+                        f"You have accused {self._players[acc_idx].get_name()} but they are NOT the murderer!"
+                    )
+                    print(
+                        "You have failed to solve the mystery, and the murderer is still at large!"
+                    )
+                self._won = False
+            self._game_over = True
+        elif choice == "2":
+            self._print("Your past choices:")
+            for memory in self._memory_human_readable:
+                self._print(memory)
+        elif choice == "3":
+            if self._verbosity >= 1:
+                print("Game ended by quit.")
+            self._won = False
+            self._game_over = True
+        else:
+            self._print("Invalid choice. Please try again.")
 
     def play_game(self):
         while not self._game_over:
-            self._make_choice()
+            if self._choice_no >= self._max_choices:
+                self._make_last_choice()
+            else:
+                self._make_choice()
+        return self._won
+
+    def _get_input(self, prompt: str, menu_context: str = None, max_value: int = None, max_retries: int = 3):
+        """Get input from human or LLM.
+
+        Args:
+            prompt: The prompt to show
+            menu_context: Optional menu options to include for LLM
+            max_value: If provided, validate that choice is 1 to max_value (for LLM only)
+            max_retries: Maximum retries for invalid LLM responses
+        """
+        if self._is_llm_player:
+            context = self._build_llm_context()
+            if menu_context:
+                base_prompt = f"{context}\n\n{menu_context}\n\n{prompt}\n\nRespond with ONLY the number of your choice."
+            else:
+                base_prompt = f"{context}\n\n{prompt}\n\nRespond with ONLY the number of your choice."
+
+            for attempt in range(max_retries + 1):
+                if attempt == 0:
+                    full_prompt = base_prompt
+                else:
+                    full_prompt = f"{base_prompt}\n\nYour previous response was invalid. Please respond with a number between 1 and {max_value}."
+
+                response = self._llm_player.get_choice(full_prompt)
+                choice = "".join(c for c in response if c.isdigit())[:1]
+
+                # Validate if max_value is provided
+                if max_value is not None:
+                    idx = self._validate_choice(choice, max_value)
+                    if idx is not None:
+                        self._print(f"LLM chose: {choice}")
+                        return choice
+                    # Invalid response, will retry
+                    self._print(f"LLM gave invalid response: {response!r}, retrying...")
+                else:
+                    self._print(f"LLM chose: {choice}")
+                    return choice
+
+            # After all retries failed, default to "1"
+            self._print(f"LLM failed after {max_retries} retries, defaulting to 1")
+            return "1"
+        else:
+            return input(prompt)
+
+    def _build_llm_context(self):
+        """Build context for LLM based on past choices."""
+        context = "You are a detective solving a murder mystery"
+        context += f"The suspects are {', '.join([player.get_name() for player in self._players])}"
+        context += "\nEvidence gathered so far: "
+        for memory in self._memory_human_readable:
+            context += f"\n{memory}"
+        context += "\nUse ONLY the evidence provided to make your decision."
+        return context
 
 
 if __name__ == "__main__":
     game = MurderMystery(
-        num_players=5, num_accomplices=2, noise_level=0.25, memory_file="game_memory.md"
+        num_players=5,
+        num_accomplices=2,
+        noise_level=0.25,
+        memory_file="game_memory.md",
+        max_choices=2,
     )
     game.play_game()
