@@ -7,7 +7,7 @@ Runs the game multiple times across different player counts and tracks success r
 import argparse
 from tqdm import tqdm
 from murdermystery import MurderMystery
-from llm_player import LLMPlayer
+from llm_player import LLMPlayer, CoTLLMPlayer
 
 
 def run_benchmark(
@@ -18,6 +18,7 @@ def run_benchmark(
     frac_accomplices: float = 0.2,
     max_choices: int = 100,
     verbosity: int = 0,
+    agent_type: str = "standard",
 ):
     """
     Run benchmark across different player counts.
@@ -36,6 +37,13 @@ def run_benchmark(
     """
     if player_counts is None:
         player_counts = [3, 5, 7, 10]
+
+    if agent_type == "cot":
+        print("Using Chain-of-Thought LLM Player")
+        LLMClass = CoTLLMPlayer
+    else:
+        print("Using Standard LLM Player")
+        LLMClass = LLMPlayer
 
     results = {}
 
@@ -63,7 +71,7 @@ def run_benchmark(
         for seed in pbar:
             try:
                 # Create fresh LLM player for each game (reset conversation)
-                llm = LLMPlayer(model=model)
+                llm = LLMClass(model=model)
 
                 game = MurderMystery(
                     num_players=num_players,
@@ -161,6 +169,14 @@ def main():
         help="Output verbosity: 0=minimal, 1=show choices, 2=full (default: 0)",
     )
 
+    parser.add_argument(
+        "--agent-type",
+        type=str,
+        default="standard",
+        choices=["standard", "cot"],
+        help="Type of LLM agent to use: 'standard' or 'cot' (default: standard)",
+    )
+
     args = parser.parse_args()
 
     player_counts = [int(x.strip()) for x in args.players.split(",")]
@@ -173,6 +189,7 @@ def main():
         frac_accomplices=args.accomplices,
         max_choices=args.max_choices,
         verbosity=args.verbosity,
+        agent_type=args.agent_type,
     )
 
 
