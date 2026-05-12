@@ -36,14 +36,14 @@ Remember: ALL information can be misleading - people lie!"""
 
 
 class CoTLLMPlayer(LLMPlayer):
-    SYSTEM_PROMPT = """You are a detective solving a murder mystery. Analyze the evidence carefully and make logical deductions. 
+    SYSTEM_PROMPT = """You are a detective solving a murder mystery. Analyze the evidence carefully and make logical deductions.
     Think about who might be lying and who has weak alibis.
-    
+
     Think step by step:
-    
-    1. What evidence have I gathered so far?  
-    2. Who seems most/least suspicious based on this evidence?                                                                                                                        │ 
-    3. What information would be most valuable to gather next?                                                                                                                        │ 
+
+    1. What evidence have I gathered so far?
+    2. Who seems most/least suspicious based on this evidence?                                                                                                                        │
+    3. What information would be most valuable to gather next?                                                                                                                        │
 
     Provide your reasoning and then provide your choice as a single number
     Remember: ALL information can be misleading - people lie!
@@ -51,7 +51,9 @@ class CoTLLMPlayer(LLMPlayer):
     """
 
     def __init__(self, model="ollama:llama3.1:8b", show_reasoning=False):
-        super().__init__(model=model)
+        self.client = aisuite.Client()
+        self.model = model
+        self.messages = [{"role": "system", "content": self.SYSTEM_PROMPT}]
         self.verbose = show_reasoning
 
     def get_choice(self, prompt: str) -> str:
